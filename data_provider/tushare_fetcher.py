@@ -30,6 +30,11 @@ from tenacity import (
 )
 
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS
+from .realtime_types import (
+    UnifiedRealtimeQuote, ChipDistribution, RealtimeSource,
+    get_realtime_circuit_breaker, get_chip_circuit_breaker,
+    safe_float, safe_int  # 使用统一的类型转换函数
+)
 from src.config import get_config
 import os
 
@@ -669,6 +674,37 @@ class TushareFetcher(BaseFetcher):
         """
         # Tushare 获取板块数据较复杂，暂时返回 None，让 AkShare 处理
         return None
+    
+    def _calculate_akshare_fields_from_tushare(self, row):
+        """
+        根据Tushare的cyq_perf数据，计算AKShare的区间和集中度
+        """
+        # 获取Tushare提供的分位成本数据
+        cost_5 = safe_float(row.get('cost_5pct'))
+        cost_15 = safe_float(row.get('cost_15pct'))
+        cost_85 = safe_float(row.get('cost_85pct'))
+        cost_95 = safe_float(row.get('cost_95pct'))
+        
+        # 计算90%成本区间和集中度 (5% ~ 95%)
+        high_90 = cost_95
+        low_90 = cost_5
+        concentration_90 = (high_90 - low_90) / (high_90 + low_90) * 100 if (high_90 + low_90) > 0 else 0
+        
+        # 计算70%成本区间和集中度 (15% ~ 85%)
+        high_70 = cost_85
+        low_70 = cost_15
+        concentration_70 = (high_70 - low_70) / (high_70 + low_70) * 100 if (high_70 + low_70) > 0 else 0
+        
+        return {
+            'profit_ratio': safe_float(row.get('winner_rate')) / 100,  # 转换为0-1之间的比例
+            'avg_cost': safe_float(row.get('weight_avg')),  # 加权平均成本
+            'cost_90_low': low_90,
+            'cost_90_high': high_90,
+            'concentration_90': round(concentration_90, 2),
+            'cost_70_low': low_70,
+            'cost_70_high': high_70,
+            'concentration_70': round(concentration_70, 2),
+        }
 
 
 if __name__ == "__main__":
