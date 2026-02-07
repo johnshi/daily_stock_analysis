@@ -684,17 +684,17 @@ class TushareFetcher(BaseFetcher):
         cost_15 = safe_float(row.get('cost_15pct'))
         cost_85 = safe_float(row.get('cost_85pct'))
         cost_95 = safe_float(row.get('cost_95pct'))
-        
+
         # 计算90%成本区间和集中度 (5% ~ 95%)
         high_90 = cost_95
         low_90 = cost_5
         concentration_90 = (high_90 - low_90) / (high_90 + low_90) * 100 if (high_90 + low_90) > 0 else 0
-        
+
         # 计算70%成本区间和集中度 (15% ~ 85%)
         high_70 = cost_85
         low_70 = cost_15
         concentration_70 = (high_70 - low_70) / (high_70 + low_70) * 100 if (high_70 + low_70) > 0 else 0
-        
+
         return {
             'profit_ratio': safe_float(row.get('winner_rate')) / 100,  # 转换为0-1之间的比例
             'avg_cost': safe_float(row.get('weight_avg')),  # 加权平均成本
@@ -705,6 +705,108 @@ class TushareFetcher(BaseFetcher):
             'cost_70_high': high_70,
             'concentration_70': round(concentration_70, 2),
         }
+
+    def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
+        """
+        获取筹码分布数据
+
+        数据来源：Tushare Pro cyq_perf 接口
+        包含：获利比例、平均成本、筹码集中度（5%, 15%, 85%, 95%分位成本）
+
+        注意：ETF/指数没有筹码分布数据，会直接返回 None
+
+        Args:
+            stock_code: 股票代码，如 '600519', '000001'
+
+        Returns:
+            ChipDistribution 对象（最新一天的数据），获取失败返回 None
+        """
+        if self._api is None:
+            logger.warning("Tushare API 未初始化，无法获取筹码分布")
+            return None
+
+        # 美股没有筹码分布数据
+        if _is_us_code(stock_code):
+            logger.debug(f"[Tushare] {stock_code} 是美股，无筹码分布数据")
+            return None
+
+        # ETF/指数没有筹码分布数据（简单判断：代码以特定数字开头）
+        # 上交所ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
+        # 深交所ETF: 15xxxx, 16xxxx, 18xxxx
+        etf_prefixes = ('51', '52', '56', '58', '15', '16', '18')
+        code_6 = stock_code.split('.')[0] if '.' in stock_code else stock_code
+        if code_6.startswith(etf_prefixes) and len(code_6) == 6:
+            logger.debug(f"[Tushare] {stock_code} 是 ETF/指数，无筹码分布数据")
+            return None
+
+        try:
+            # 速率限制检查
+            self._check_rate_limit()
+
+            # 转换代码格式
+            ts_code = self._convert_stock_code(stock_code)
+
+            # 获取最近交易日（过去5天）
+            end_date = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - pd.Timedelta(days=10)).strftime('%Y%m%d')
+
+            logger.info(f"[Tushare] 调用 cyq_perf({ts_code}) 获取筹码分布...")
+
+            # 调用 Tushare cyq_perf 接口获取筹码分布数据
+            df = self._api.cyq_perf(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+            if df is None or df.empty:
+                logger.warning(f"[Tushare] cyq_perf 返回空数据")
+                return None
+
+            # 按日期排序，取最新一天的数据
+            df = df.sort_values('trade_date', ascending=True)
+            latest = df.iloc[-1]
+
+            # 提取日期
+            trade_date = str(latest.get('trade_date', ''))
+            if trade_date and len(trade_date) == 8:
+                formatted_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+            else:
+                formatted_date = trade_date
+
+            # 使用已有的计算方法转换数据
+            chip_data = self._calculate_akshare_fields_from_tushare(latest)
+
+            # 构建 ChipDistribution 对象
+            chip = ChipDistribution(
+                code=stock_code,
+                date=formatted_date,
+                source="tushare",
+                profit_ratio=chip_data['profit_ratio'],
+                avg_cost=chip_data['avg_cost'],
+                cost_90_low=chip_data['cost_90_low'],
+                cost_90_high=chip_data['cost_90_high'],
+                concentration_90=chip_data['concentration_90'],
+                cost_70_low=chip_data['cost_70_low'],
+                cost_70_high=chip_data['cost_70_high'],
+                concentration_70=chip_data['concentration_70'],
+            )
+
+            logger.info(f"[Tushare] {stock_code} 筹码分布: 获利比例={chip.profit_ratio:.1%}, "
+                       f"平均成本={chip.avg_cost:.2f}, 90%集中度={chip.concentration_90:.2f}%")
+
+            return chip
+
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # 检测配额或权限问题
+            if any(keyword in error_msg for keyword in ['quota', '配额', 'limit', '权限', '积分']):
+                logger.warning(f"[Tushare] 获取筹码分布可能权限不足（需要Pro积分）: {e}")
+            else:
+                logger.error(f"[Tushare] 获取 {stock_code} 筹码分布失败: {e}")
+
+            return None
 
 
 if __name__ == "__main__":
